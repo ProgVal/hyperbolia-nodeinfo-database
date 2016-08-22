@@ -5,6 +5,7 @@ import json
 import time
 import resource
 import requests
+import functools
 import multiprocessing
 import multiprocessing.dummy
 
@@ -12,6 +13,7 @@ DB_FILE = './nodeinfo_database.json'
 
 #GRAPH_JSON_URL = 'http://map.hype.ovh/static/graph.json'
 GRAPH_JSON_URL = 'https://www.fc00.org/static/graph.json'
+HIA_JSON_URL = 'http://api.hia.cjdns.ca/'
 
 REQUEST_TIMEOUT = 10 # in seconds
 MAX_HEAP_SIZE = 10*1024*1024 # in bytes
@@ -25,10 +27,15 @@ def fix_json(s):
     s = _missing_colon_re.sub(lambda m: '":' + m.group('char'), s)
     return s
 
-def get_nodes(url):
+def get_nodes():
     """Return a list of nodes from a public database."""
-    graph = requests.get(url).json()
-    return graph['nodes']
+    hia_headers = {'User-Agent': 'nodeinfo-database'}
+    print('Downloading nodes from HIA.')
+    nodes = set(requests.get(HIA_JSON_URL, headers=hia_headers).json())
+    print('Downloading nodes from fc00')
+    nodes.update(node['id'] for node in requests.get(GRAPH_JSON_URL).json()['nodes'])
+    print('Done.')
+    return nodes
 
 
 def _request_worker(url, queue):
@@ -83,15 +90,17 @@ def get_nodeinfo(ip_address):
         print('Warning: could not decode JSON from {}'.format(url))
         return None
 
-def get_nodeinfo_worker(node):
-    node_id = node['id']
-    nodeinfo = get_nodeinfo(node_id)
+def get_nodeinfo_worker(processed_nodes, all_nodes, node):
+    nodeinfo = get_nodeinfo(node)
+    processed_nodes.append(node)
     if nodeinfo is None:
-        print('{} has no nodeinfo.'.format(node_id))
-        return (node_id, None)
+        print('{}/{}: {} has no nodeinfo.'.format(
+            len(processed_nodes), len(all_nodes), node))
+        return (node, None)
     else:
-        print('{} has a nodeinfo.'.format(node_id))
-        return (node_id, nodeinfo)
+        print('{}/{}: {} has a nodeinfo.'.format(
+            len(processed_nodes), len(all_nodes), node))
+        return (node, nodeinfo)
 
 def write_db(filename, db):
     """Write the nodeinfo database to a file."""
@@ -107,9 +116,12 @@ def main():
     else:
         db = {}
 
-    nodes = get_nodes(GRAPH_JSON_URL)
-    with multiprocessing.dummy.Pool(100) as pool:
-        results = pool.map(get_nodeinfo_worker, nodes)
+    nodes = get_nodes()
+    with multiprocessing.Manager() as manager:
+        processed = manager.list()
+        with multiprocessing.dummy.Pool(100) as pool:
+            predicate = functools.partial(get_nodeinfo_worker, processed, nodes)
+            results = pool.map(predicate, nodes)
 
     for (node, nodeinfo) in results:
         db[node] = {
@@ -119,5 +131,4 @@ def main():
     write_db(DB_FILE, db)
 
 if __name__ == '__main__':
-    #print(get_nodeinfo_worker({'id': 'fcd6:9c33:dd06:3320:8dbe:ab19:c87:f6e3'}))
     main()
